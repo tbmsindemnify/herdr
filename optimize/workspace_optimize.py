@@ -15,7 +15,7 @@ import hashlib
 ROOT = Path.home() / '.local/share/herdr-harness/workspace-optimization'
 SKILL = Path.home() / '.codex/skills/workspace-optimize/SKILL.md'
 # Agents whose chat editor Optimize can read and rewrite in place (ctrl+e, ctrl+u clears the line).
-SUPPORTED_AGENTS = {'claude': 'Claude', 'codex': 'Codex', 'agy': 'Antigravity', 'hermes': 'Hermes'}
+SUPPORTED_AGENTS = {'claude': 'Claude', 'codex': 'Codex', 'agy': 'Antigravity', 'hermes': 'Hermes', 'copilot': 'GitHub Copilot', 'gemini': 'Gemini'}
 COMPACT_AT = 70  # Herdr local policy, not a provider-recommended threshold.
 EMPTY_WORDS = {'', 'empty', 'none', 'n/a', 'na', 'null', 'not applicable', 'not needed'}
 OPAQUE_ID = re.compile(r'^app-[0-9a-f]{20,}$')  # connected-app ids the agent cannot act on by name
@@ -59,7 +59,9 @@ def save(path, value):
 def draft_block(text):
     """Recognize the bottom idle editor, never an earlier transcript prompt."""
     lines = text.splitlines()
-    markers = [(i, re.match(r'^\s*[❯›>]\s?(.*)$', line)) for i, line in enumerate(lines)]
+    # ❯ Claude/Codex/Hermes · › Codex · > Gemini CLI · ┃ GitHub Copilot CLI
+    # Gemini CLI boxes its editor: '│ > text   │'; allow one leading box edge and drop a trailing one.
+    markers = [(i, re.match(r'^\s*(?:│\s*)?[❯›>┃]\s?(.*?)\s*│?\s*$', line)) for i, line in enumerate(lines)]
     markers = [(i, match) for i, match in markers if match]
     if not markers:
         return None
@@ -71,7 +73,13 @@ def draft_block(text):
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.startswith(('─', '━', '⏵', '? for shortcuts', '← for agents')):
+        if stripped.startswith(('─', '━', '⏵', '? for shortcuts', '← for agents', '╹', '╻', '╰', '╭')):
+            continue
+        # GitHub Copilot CLI status line: 'Interactive · Manual Approval · @ files · # issues   GPT-5.6 Terra'
+        if ' · ' in stripped and (stripped.startswith('←') or re.search(r'\b(?:Interactive|Autopilot|Plan|Manual Approval)\b', stripped)):
+            continue
+        # Gemini CLI footer: '~/dir   no sandbox (see /docs)   gemini-2.5-pro (98% context left)'
+        if re.search(r'context left\)|no sandbox \(see /docs\)|YOLO mode', stripped):
             continue
         if re.match(r'^(?:GPT-|gpt-|Claude |Sonnet |Opus |Haiku |Qwen|qwen|Gemini |gemini)', stripped) and ' · ' in stripped:
             continue
@@ -82,7 +90,7 @@ def draft_block(text):
     value = match.group(1).strip()
     if re.search(r'\[Pasted (?:Content|text)\b', value, re.I):
         raise ValueError('Collapsed pasted text cannot be read completely. Original retained; use the editable Original field in Optimize settings.')
-    if value in ('Ask Codex to do anything', 'Send a message', '? for shortcuts'):
+    if value in ('Ask Codex to do anything', 'Send a message', '? for shortcuts', 'Type your message or @path/to/file'):
         return ''
     # Claude Code 2.1+ fills an empty editor with a rotating tip such as: Try "how does <filepath> work?"
     if re.fullmatch(r'Try ".*"\??', value):
