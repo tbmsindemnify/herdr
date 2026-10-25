@@ -1,5 +1,20 @@
 use super::*;
 
+fn harness_menu_gradient(position: u16, width: u16) -> ratatui::style::Color {
+    let span = i32::from(width.saturating_sub(1)).max(1);
+    let step = i32::from(position) * 2;
+    let purple = [193, 118, 255];
+    let orange = [255, 159, 67];
+    let pink = [255, 92, 182];
+    let (from, to, t) = if step <= span {
+        (purple, orange, step)
+    } else {
+        (orange, pink, step - span)
+    };
+    let channel = |i: usize| (from[i] + (to[i] - from[i]) * t / span) as u8;
+    ratatui::style::Color::Rgb(channel(0), channel(1), channel(2))
+}
+
 fn restore_mode_bar(
     frame: &mut FrameData,
     bar: Option<Rect>,
@@ -177,6 +192,10 @@ impl ClientShellState {
             ),
             _ => (None, None),
         };
+        let merge_navigation = self
+            .workspace_merge_hover
+            .as_ref()
+            .and_then(|id| self.navigation_target(&self.active_endpoint_id, id));
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, rows));
         self.hits = render::render_shell(
             &mut buffer,
@@ -200,7 +219,8 @@ impl ClientShellState {
                 selected_workspace_id: self
                     .navigate_workspace_id
                     .as_ref()
-                    .filter(|_| valid_navigation_target),
+                    .filter(|_| valid_navigation_target)
+                    .or(merge_navigation.as_ref()),
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
@@ -612,6 +632,63 @@ impl ClientShellState {
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         if let Some(bar) = mode_bar {
             occlusion.cover(bar);
+        }
+        self.hits.optimize_buttons.clear();
+        self.hits.harness_buttons.clear();
+        if self.active_endpoint_id.is_local() && self.config.mouse_capture && self.overlay.is_none() {
+            let mut composed = frame.to_ratatui_buffer()?;
+            for hit in &self.hits.panes {
+                // Use borders so terminal output and prompt text stay unobscured.
+                let row = if hit.inner_rect.bottom() < hit.rect.bottom() { hit.rect.bottom() - 1 }
+                    else if hit.inner_rect.y > hit.rect.y { hit.rect.y }
+                    else if self.hits.panes.len() == 1 && !layout.tab_bar.is_empty() { layout.tab_bar.y }
+                    else { continue; };
+                if hit.rect.width < 24 { continue; }
+                let x = if self.hits.panes.len() == 1 && row == layout.tab_bar.y { self.hits.new_tab.right() + 2 }
+                    else { hit.rect.x + 2 };
+                let rect = Rect::new(x, row, 12, 1);
+                let optimizing = self.optimizer_pane.as_deref() == Some(hit.pane_id.as_str());
+                render::put_text(&mut composed, rect.x, rect.y, rect.width, if optimizing { " ◌ Working  " } else { " ✦ Optimize " },
+                    Style::default().fg(ratatui::style::Color::Rgb(24, 16, 39)).bg(ratatui::style::Color::Rgb(232, 183, 76)).add_modifier(Modifier::BOLD));
+                self.hits.optimize_buttons.push((rect, hit.pane_id.clone()));
+                occlusion.cover(rect);
+                if hit.rect.width > 50 {
+                    let usage_rect = Rect::new(rect.right() + 1, row, hit.rect.right().saturating_sub(rect.right() + 2), 1);
+                    let usage = self.usage_labels.get(&hit.pane_id).map(String::as_str).unwrap_or("Tokens / cache: waiting for telemetry");
+                    render::put_text(&mut composed, usage_rect.x, usage_rect.y, usage_rect.width, usage,
+                        Style::default().fg(ratatui::style::Color::Rgb(183, 190, 202)).bg(self.config.palette.panel_bg));
+                    occlusion.cover(usage_rect);
+                }
+            }
+            if layout.tab_bar.width > 100 {
+                let mut x = layout.tab_bar.right().saturating_sub(64);
+                let last_tab = self.hits.tabs.iter().map(|(r, _)| r.right()).max().unwrap_or(0).max(self.hits.new_tab.right());
+                if x > last_tab {
+                    let menu = Rect::new(x, layout.tab_bar.y, 58, 1);
+                    for offset in 0..menu.width {
+                        composed[(menu.x + offset, menu.y)].reset();
+                    }
+                    for (label, section, width) in [(" Skills ▾ ", "skills", 11), (" Plugins ▾ ", "plugins", 12), (" Image & Video Apps ▾ ", "media", 23), (" Models ▾ ", "models", 12)] {
+                        let rect = Rect::new(x, layout.tab_bar.y, width, 1);
+                        render::put_text(&mut composed, x, rect.y, width, label,
+                            Style::default().fg(ratatui::style::Color::Rgb(28, 12, 36)).add_modifier(Modifier::BOLD));
+                        self.hits.harness_buttons.push((rect, section.into()));
+                        x += width;
+                    }
+                    // One continuous, fixed-width client-chrome gradient; no per-pane work.
+                    for offset in 0..menu.width {
+                        composed[(menu.x + offset, menu.y)].set_bg(harness_menu_gradient(offset, menu.width));
+                    }
+                    occlusion.cover(menu);
+                }
+            }
+            if layout.sidebar.width >= 4 && layout.sidebar.height > 2 {
+                let rect = Rect::new(layout.sidebar.x + 1, layout.sidebar.bottom() - 1, 3, 1);
+                render::put_text(&mut composed, rect.x, rect.y, 3, " ⚙ ", Style::default().fg(self.config.palette.accent).bg(self.config.palette.panel_bg));
+                self.hits.harness_buttons.push((rect, "settings".into()));
+            }
+            let cursor = frame.cursor.clone();
+            frame.replace_from_ratatui_buffer_preserving_effects(&composed, cursor);
         }
         if let Some(overlay) = self.overlay.as_ref() {
             let mut composed = frame.to_ratatui_buffer()?;

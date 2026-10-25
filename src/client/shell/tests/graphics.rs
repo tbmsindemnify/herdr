@@ -275,6 +275,9 @@ fn every_dialog_and_menu_occludes_its_panel_not_the_whole_screen() {
             integration_messages: Vec::new(),
             loading_integrations: false,
             installing_integrations: false,
+            native_rows: Vec::new(),
+            native_message: String::new(),
+            native_edit: None, native_pane: None, native_result: None,
         }),
     ];
     for overlay in overlays {

@@ -39,6 +39,23 @@ pub(super) fn render_settings_overlay(
     integration_updates_available: bool,
     palette: &Palette,
 ) -> Option<OverlayRender> {
+    // A custom black panel can be combined with a light theme's dark text.
+    // Repair contrast locally without changing the user's terminal/theme config.
+    let mut readable = palette.clone();
+    if matches!(palette.panel_bg, ratatui::style::Color::Black | ratatui::style::Color::Rgb(0, 0, 0)) {
+        let dark_text = match palette.text {
+            ratatui::style::Color::Black | ratatui::style::Color::DarkGray => true,
+            ratatui::style::Color::Rgb(r, g, b) => u16::from(r) + u16::from(g) + u16::from(b) < 384,
+            _ => false,
+        };
+        if dark_text {
+            readable.text = ratatui::style::Color::Rgb(235, 235, 235);
+            readable.subtext0 = readable.text;
+            readable.overlay1 = ratatui::style::Color::Rgb(180, 180, 180);
+            readable.surface0 = ratatui::style::Color::Rgb(48, 48, 48);
+        }
+    }
+    let palette = &readable;
     let integration_height = 14u16
         .saturating_add(settings.integrations.len().max(1) as u16)
         .saturating_add(settings.integration_messages.len().min(6) as u16);
@@ -47,7 +64,7 @@ pub(super) fn render_settings_overlay(
     } else {
         22
     };
-    let popup = popup(buffer.area, 76, height)?;
+    let popup = popup(buffer.area, 108, if settings.section == ClientSettingsSection::Optimize { 36 } else { height.max(26) })?;
     let inner = panel(buffer, popup, palette.accent, palette.panel_bg)?;
     if inner.width < 20 || inner.height < 8 {
         return None;
@@ -58,7 +75,7 @@ pub(super) fn render_settings_overlay(
         inner.x,
         inner.y,
         inner.width,
-        " settings",
+        if settings.section == ClientSettingsSection::Optimize { " ✦ Optimize workspace · review before applying" } else { " settings" },
         Style::default()
             .fg(palette.text)
             .bg(palette.panel_bg)
@@ -71,6 +88,7 @@ pub(super) fn render_settings_overlay(
             .iter()
             .any(|integration| integration.state == crate::api::schema::IntegrationState::Outdated);
     let mut tab_x = inner.x;
+    let mut tab_y = inner.y + 1;
     let mut tab_hits = Vec::new();
     for section in ClientSettingsSection::ALL {
         let badge = *section == ClientSettingsSection::Integrations && integration_badge;
@@ -79,8 +97,9 @@ pub(super) fn render_settings_overlay(
         } else {
             format!(" {} ", section.label())
         };
-        let width = display_width(&label).min(inner.right().saturating_sub(tab_x));
-        let rect = Rect::new(tab_x, inner.y + 1, width, 1);
+        let width = display_width(&label).min(inner.width);
+        if tab_x + width > inner.right() { tab_x = inner.x; tab_y += 1; }
+        let rect = Rect::new(tab_x, tab_y, width, 1);
         let active = *section == settings.section;
         let style = if active {
             Style::default()
@@ -107,14 +126,12 @@ pub(super) fn render_settings_overlay(
         }
         tab_hits.push((rect, *section));
         tab_x = tab_x.saturating_add(width.saturating_add(1));
-        if tab_x >= inner.right() {
-            break;
-        }
+
     }
     put_text(
         buffer,
         inner.x,
-        inner.y + 2,
+        tab_y + 1,
         inner.width,
         &"─".repeat(inner.width as usize),
         Style::default().fg(palette.surface0).bg(palette.panel_bg),
@@ -122,9 +139,9 @@ pub(super) fn render_settings_overlay(
 
     let content = Rect::new(
         inner.x,
-        inner.y + 4,
+        tab_y + 3,
         inner.width,
-        inner.height.saturating_sub(7),
+        inner.bottom().saturating_sub(tab_y + 7),
     );
     let mut choice_hits = Vec::new();
     match settings.section {
@@ -197,6 +214,30 @@ pub(super) fn render_settings_overlay(
         ClientSettingsSection::Integrations => {
             render_integrations(buffer, content, settings, palette);
         }
+        _ => {
+            let is_optimizer = settings.section == ClientSettingsSection::Optimize;
+            let visible = usize::from(content.height.saturating_sub(if is_optimizer { 11 } else { 3 }));
+            let scroll = settings.selected.saturating_sub(visible.saturating_sub(1));
+            for (offset, (index, item)) in settings.native_rows.iter().enumerate().skip(scroll).take(visible).enumerate() {
+                let rect = Rect::new(content.x, content.y + offset as u16, content.width, 1);
+                let label = if item.editable { format!("{}: {}", item.label, item.value) } else { item.label.clone() };
+                draw_choice(buffer, rect, &label, index == settings.selected, false, palette);
+                choice_hits.push((rect, index));
+            }
+            let style = Style::default().fg(palette.text).bg(palette.panel_bg);
+            if is_optimizer {
+                use ratatui::widgets::{Paragraph, Widget, Wrap};
+                let selected = settings.native_rows.get(settings.selected);
+                let detail = settings.native_edit.as_ref().map(|e| e.as_str()).or_else(|| selected.map(|r| if r.value.is_empty() { r.label.as_str() } else { r.value.as_str() })).unwrap_or("");
+                Paragraph::new(detail).style(style).wrap(Wrap { trim: false }).render(Rect::new(content.x, content.y + visible as u16 + 1, content.width, 7), buffer);
+            }
+            if let Some(editor) = &settings.native_edit {
+                let (text, cursor) = editor.viewport(content.width.saturating_sub(4));
+                put_text(buffer, content.x, content.bottom().saturating_sub(3), content.width, &format!("> {text}"), style);
+                buffer.set_style(Rect::new(content.x + 2 + cursor, content.bottom().saturating_sub(3), 1, 1), Style::default().bg(palette.accent).fg(contrast(palette)));
+            }
+            put_text(buffer, content.x, content.bottom().saturating_sub(1), content.width, &settings.native_message, style);
+        }
     }
 
     let installable = settings
@@ -239,7 +280,7 @@ pub(super) fn render_settings_overlay(
         inner.x,
         inner.bottom().saturating_sub(2),
         inner.width,
-        " ↑↓ select  tab section",
+        if settings.native_edit.is_some() { " type to edit · Enter save · Esc cancel edit" } else { " ↑↓ select · Tab section · Enter apply/edit · r refresh" },
         Style::default().fg(palette.overlay1).bg(palette.panel_bg),
     );
 

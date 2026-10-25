@@ -32,6 +32,12 @@ pub(super) fn integration_needs_install(info: &crate::api::schema::IntegrationIn
 }
 
 impl ClientShellState {
+    pub(crate) fn begin_inline_optimizer(&mut self, pane: String, receiver: std::sync::mpsc::Receiver<String>) -> bool {
+        if self.optimizer_result.is_some() || !self.active_endpoint_id.is_local() { return false; }
+        self.optimizer_pane = Some(pane);
+        self.optimizer_result = Some(receiver);
+        true
+    }
     pub(super) fn open_settings_overlay(&mut self) {
         self.overlay = Some(ClientShellOverlay::Settings(ClientSettingsOverlay {
             section: ClientSettingsSection::Theme,
@@ -42,6 +48,7 @@ impl ClientShellState {
             integration_messages: Vec::new(),
             loading_integrations: false,
             installing_integrations: false,
+            native_rows: Vec::new(), native_message: String::new(), native_edit: None, native_pane: None, native_result: None,
         }));
     }
 
@@ -51,7 +58,7 @@ impl ClientShellState {
             ClientSettingsSection::Indicators => indicator_index(self.config.status_indicators),
             ClientSettingsSection::Sound => usize::from(!self.config.sound_enabled),
             ClientSettingsSection::Toast => toast_index(self.config.toast_delivery),
-            ClientSettingsSection::Integrations => 0,
+            _ => 0,
         }
     }
 
@@ -73,6 +80,10 @@ impl ClientShellState {
         if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
             settings.section = section;
             settings.selected = selected;
+            settings.native_edit = None; settings.native_result = None; settings.native_rows.clear(); settings.native_message.clear();
+        }
+        if section.is_native_extension() {
+            self.request_native_settings(None, String::new(), outcome);
         }
         if request_integrations {
             self.queue_integration_list(outcome, true);
@@ -100,6 +111,7 @@ impl ClientShellState {
                 ClientSettingsSection::Indicators | ClientSettingsSection::Sound => 2,
                 ClientSettingsSection::Toast => 4,
                 ClientSettingsSection::Integrations => settings.integrations.len(),
+                _ => settings.native_rows.len(),
             },
             _ => 0,
         }
@@ -124,6 +136,7 @@ impl ClientShellState {
     pub(super) fn select_settings_choice(&mut self, index: usize) {
         let count = self.settings_choice_count();
         if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            settings.native_edit = None;
             if count > 0 {
                 settings.selected = index.min(count - 1);
             }
@@ -223,6 +236,7 @@ impl ClientShellState {
                 );
             }
             ClientSettingsSection::Integrations => self.install_recommended_integrations(outcome),
+            _ => self.apply_native_settings(outcome),
         }
     }
 
@@ -356,6 +370,19 @@ impl ClientShellState {
             return false;
         }
         let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
+        if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            if let Some(editor) = settings.native_edit.as_mut() {
+                if code == KeyCode::Esc { settings.native_edit = None; }
+                else if code == KeyCode::Enter { self.apply_native_settings(outcome); }
+                else { editor.handle_key(key); }
+                outcome.repaint = true;
+                return true;
+            }
+        }
+        if code == KeyCode::Char('r') && modifiers.is_empty() {
+            self.request_native_settings(None, String::new(), outcome);
+            return true;
+        }
         if code == KeyCode::Esc {
             if !matches!(
                 self.overlay,
@@ -396,5 +423,140 @@ impl ClientShellState {
             return true;
         }
         true
+    }
+}
+
+impl ClientSettingsSection {
+    pub(super) fn is_native_extension(self) -> bool {
+        matches!(self, Self::Opacity | Self::Keys | Self::Agents | Self::Models | Self::Skills | Self::Plugins | Self::Media | Self::Request | Self::Optimize)
+    }
+}
+
+impl ClientShellState {
+    pub(crate) fn open_harness_settings(&mut self, section: &str) -> Vec<ClientShellAction> {
+        self.open_settings_overlay();
+        let selected = ClientSettingsSection::ALL.iter().find(|s| s.label() == section).copied().unwrap_or(ClientSettingsSection::Theme);
+        let mut outcome = ClientShellInput::default();
+        self.select_settings_section(selected, &mut outcome);
+        outcome.actions
+    }
+
+    fn request_native_settings(&mut self, id: Option<String>, value: String, outcome: &mut ClientShellInput) {
+        let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() else { return; };
+        if !settings.section.is_native_extension() { return; }
+        if !self.active_endpoint_id.is_local() {
+            settings.native_message = "These workspace settings are available on the local endpoint.".into();
+            outcome.repaint = true; return;
+        }
+        if settings.native_result.is_some() { return; }
+        let request = serde_json::json!({"section": settings.section.label(), "id": id, "value": value, "pane": settings.native_pane}).to_string();
+        settings.native_message = "Loading…".into();
+        outcome.actions.push(ClientShellAction::NativeSettings { request });
+        outcome.repaint = true;
+    }
+
+    fn apply_native_settings(&mut self, outcome: &mut ClientShellInput) {
+        let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() else { return; };
+        if settings.native_result.is_some() { return; }
+        let Some(row) = settings.native_rows.get(settings.selected).cloned() else { return; };
+        if row.editable && settings.native_edit.is_none() {
+            settings.native_edit = Some(if settings.section == ClientSettingsSection::Optimize { TextEditor::multiline(&row.value) } else { TextEditor::new(&row.value, true) });
+            outcome.repaint = true; return;
+        }
+        let value = settings.native_edit.take().map(|e| e.as_str().to_owned()).unwrap_or_default();
+        self.request_native_settings(Some(row.id), value, outcome);
+    }
+
+    pub(crate) fn receive_native_settings(&mut self, response: &str) -> bool {
+        let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() else { return false; };
+        match serde_json::from_str::<serde_json::Value>(response) {
+            Ok(data) => {
+                if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                    settings.native_message = error.to_owned();
+                } else {
+                    match serde_json::from_value::<Vec<NativeSettingsRow>>(data["rows"].clone()) {
+                        Ok(rows) => { settings.native_rows = rows; settings.selected = settings.selected.min(settings.native_rows.len().saturating_sub(1)); }
+                        Err(error) => { settings.native_message = error.to_string(); return true; }
+                    }
+                    settings.native_message = data["message"].as_str().unwrap_or("").to_owned();
+                }
+            }
+            Err(error) => settings.native_message = format!("Settings service: {error}"),
+        }
+        true
+    }
+}
+
+impl ClientShellState {
+    pub(crate) fn open_native_optimizer(&mut self, pane: String) -> Vec<ClientShellAction> {
+        self.open_settings_overlay();
+        if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            settings.native_pane = Some(pane);
+        }
+        let mut outcome = ClientShellInput::default();
+        self.select_settings_section(ClientSettingsSection::Optimize, &mut outcome);
+        outcome.actions
+    }
+    pub(crate) fn set_native_settings_receiver(&mut self, receiver: std::sync::mpsc::Receiver<String>) {
+        if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            settings.native_result = Some(receiver);
+        }
+    }
+    pub(crate) fn tick_native_settings(&mut self) -> bool {
+        let mut usage_changed = false;
+        if let Some(receiver) = self.usage_result.as_ref() {
+            match receiver.try_recv() {
+                Ok(response) => {
+                    if let Ok(labels) = serde_json::from_str::<HashMap<String, String>>(&response) {
+                        self.usage_labels = labels;
+                        usage_changed = true;
+                    }
+                    self.usage_result = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.usage_result = None; }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {},
+            }
+        }
+        if self.active_endpoint_id.is_local() && self.usage_result.is_none() && std::time::Instant::now() >= self.usage_next_refresh {
+            self.usage_next_refresh = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            if let Some(script) = crate::client::optimize_helpers::helper("usage.py") {
+                let socket = crate::api::client::ApiClient::local().socket_path();
+                let (sender, receiver) = std::sync::mpsc::channel();
+                self.usage_result = Some(receiver);
+                std::thread::spawn(move || {
+                    if let Ok(output) = std::process::Command::new("python3")
+                        .arg(script)
+                        .arg(socket).output() {
+                        let _ = sender.send(String::from_utf8_lossy(&output.stdout).into_owned());
+                    }
+                });
+            }
+        }
+        if let Some(receiver) = self.optimizer_result.as_ref() {
+            match receiver.try_recv() {
+                Ok(message) => {
+                    self.optimizer_result = None;
+                    self.optimizer_pane = None;
+                    self.set_endpoint_error(message.trim());
+                    return true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.optimizer_result = None;
+                    self.optimizer_pane = None;
+                    self.set_endpoint_error("Optimize stopped; original input retained.");
+                    return true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {},
+            }
+        }
+        let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() else { return usage_changed; };
+        let Some(receiver) = settings.native_result.as_ref() else { return usage_changed; };
+        let response = match receiver.try_recv() {
+            Ok(response) => response,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return usage_changed,
+            Err(_) => serde_json::json!({"error":"Settings worker stopped. Press r to retry."}).to_string(),
+        };
+        settings.native_result = None;
+        self.receive_native_settings(&response)
     }
 }

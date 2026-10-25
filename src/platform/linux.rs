@@ -981,7 +981,7 @@ fn clipboard_commands() -> Vec<ClipboardCommand> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         commands.push(ClipboardCommand {
             program: "wl-copy",
-            args: &["--type", "text/plain;charset=utf-8"],
+            args: &["--no-newline", "--type", "text/plain;charset=utf-8"],
         });
     }
 
@@ -1005,11 +1005,11 @@ fn read_clipboard_text_commands() -> Vec<ClipboardCommand> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         commands.push(ClipboardCommand {
             program: "wl-paste",
-            args: &["--type", "text/plain;charset=utf-8"],
+            args: &["--no-newline", "--type", "text/plain;charset=utf-8"],
         });
         commands.push(ClipboardCommand {
             program: "wl-paste",
-            args: &["--type", "text/plain"],
+            args: &["--no-newline", "--type", "text/plain"],
         });
     }
 

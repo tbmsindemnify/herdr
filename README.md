@@ -1,3 +1,19 @@
+# herdr + the Optimize button
+
+> **This is a fork of [herdrdev/herdr](https://github.com/herdrdev/herdr) with one addition that matters: a `✦ Optimize` button on every
+> agent pane.** Type a rough draft into Claude Code, Codex or Hermes, click the button, and a *local* model rewrites it into the
+> shape the frontier model wants — goal, constraints kept, effort, which installed skills to read, whether to compact first — and
+> puts it back in the editor **unsent**. You read it, then you press Enter. No cloud call, no telemetry, your draft never leaves the box.
+>
+> - What changed and why: [CHANGES.md](CHANGES.md) · helpers: [`optimize/`](optimize/) · build + install: `ZIG=... ./install.sh`
+> - The harness-agnostic version (any app, highlight + hotkey, Claude Code `/optimize`, daily refresh of the labs' own guidance):
+>   [tbmsindemnify/optimize-button](https://github.com/tbmsindemnify/optimize-button)
+> - Requirements beyond upstream: `python3`, a local model (Ollama, or exo), Zig 0.16 to build.
+>
+> Everything below is upstream's README. Upstream's Apache-2.0 license applies; see [LICENSE](LICENSE).
+
+---
+
 # herdr
 
 

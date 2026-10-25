@@ -531,6 +531,9 @@ impl ClientShellState {
         }
         match pending.kind {
             PendingEndpointKind::Generic => {}
+            PendingEndpointKind::WorkspaceMerge { remaining, tab_id, reviewer } => {
+                return self.continue_workspace_merge(remaining, tab_id, reviewer, result);
+            }
             PendingEndpointKind::PaneLinkResolve { .. } => unreachable!("handled above"),
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {
                 return match result {

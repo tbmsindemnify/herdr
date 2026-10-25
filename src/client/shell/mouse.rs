@@ -652,8 +652,64 @@ impl ClientShellState {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent, outcome: &mut ClientShellInput) {
+        if matches!(mouse.kind, MouseEventKind::Down(_)) {
+            self.agent_press = None;
+        }
         self.update_link_hover(mouse, outcome);
         let point = (mouse.column, mouse.row);
+        if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
+            let source = match &self.chrome_drag {
+                Some(ClientChromeDrag::Workspace {
+                    source_workspace_id,
+                    ..
+                }) => Some(source_workspace_id.as_str()),
+                _ => self
+                    .workspace_press
+                    .as_ref()
+                    .map(|p| p.workspace_id.as_str()),
+            };
+            let target = self.active_endpoint_workspace_at(point).filter(|id| {
+                source.is_some_and(|source| source != id)
+                    && !mouse
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::SHIFT)
+            });
+            if self.workspace_merge_hover != target {
+                self.workspace_merge_hover = target;
+                outcome.repaint = true;
+            }
+        } else if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+            self.workspace_merge_hover = None;
+        }
+        if mouse.kind == MouseEventKind::Moved {
+            let pane = self
+                .hits
+                .panes
+                .iter()
+                .find(|hit| super::contains(hit.inner_rect, point))
+                .map(|hit| hit.pane_id.clone());
+            let entered = pane != self.hover_focus_pane;
+            self.hover_focus_pane = pane.clone();
+            if entered
+                && mouse.modifiers.is_empty()
+                && self.overlay.is_none()
+                && self.mode == ClientShellMode::Terminal
+                && self.chrome_drag.is_none()
+                && self.pane_mouse_gesture.is_none()
+                && self.selection.is_none()
+            {
+                if let Some(pane_id) = pane {
+                    if self.focused_pane_id().as_deref() != Some(pane_id.as_str()) {
+                        self.push_endpoint_method(
+                            crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
+                                pane_id,
+                            }),
+                            outcome,
+                        );
+                    }
+                }
+            }
+        }
         if self.mode == ClientShellMode::Navigate
             && self.workspace_preview_action_blocked()
             && self.overlay.is_none()
@@ -990,6 +1046,27 @@ impl ClientShellState {
         if self.handle_mobile_mouse(mouse, outcome) {
             return;
         }
+        if let Some((source, x, y, mut dragged)) = self.agent_press.clone() {
+            if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
+                dragged |= mouse.column.abs_diff(x) + mouse.row.abs_diff(y) >= 2;
+                self.agent_press = Some((source, x, y, dragged));
+                outcome.repaint = true;
+                return;
+            }
+            if mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+                self.agent_press = None;
+                if dragged {
+                    if let Some(target) = self.agent_drop_target(point) {
+                        self.begin_agent_drop(&source, &target, outcome);
+                    }
+                } else {
+                    self.focus_or_activate(self.active_endpoint_id.clone(),
+                        ClientEndpointFocusTarget::Pane(source), outcome);
+                }
+                outcome.repaint = true;
+                return;
+            }
+        }
         if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
             match self.chrome_drag.as_ref() {
                 Some(ClientChromeDrag::SidebarWidth) => {
@@ -1197,11 +1274,12 @@ impl ClientShellState {
                     .abs_diff(press.start_column)
                     .max(mouse.row.abs_diff(press.start_row));
                 if delta >= 1 {
-                    if let Some(insert_index) = self.tab_drop_index_at(point) {
+                    let insert_index = self.tab_drop_index_at(point);
+                    if insert_index.is_some() || self.active_endpoint_workspace_at(point).is_some() {
                         self.chrome_drag = Some(ClientChromeDrag::Tab {
                             tab_id: press.tab_id.clone(),
                             workspace_id: press.workspace_id.clone(),
-                            insert_index: Some(insert_index),
+                            insert_index,
                         });
                         outcome.repaint = true;
                     }
@@ -1219,6 +1297,12 @@ impl ClientShellState {
                         workspace_id,
                         ..
                     } => {
+                        if let Some(destination) = self.active_endpoint_workspace_at(point) {
+                            if destination != workspace_id {
+                                self.begin_tab_merge(&workspace_id, &destination, &tab_id, outcome);
+                                return;
+                            }
+                        }
                         let insert_index = self.tab_drop_index_at(point);
                         let valid_drop = self.snapshot.as_deref().is_some_and(|snapshot| {
                             snapshot.focused_workspace_id.as_deref() == Some(workspace_id.as_str())
@@ -1251,6 +1335,21 @@ impl ClientShellState {
                         source_workspace_id,
                         target,
                     } => {
+                        if !mouse
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::SHIFT)
+                        {
+                            if let Some(destination) = self.active_endpoint_workspace_at(point) {
+                                if destination != source_workspace_id {
+                                    self.begin_workspace_merge(
+                                        &source_workspace_id,
+                                        &destination,
+                                        outcome,
+                                    );
+                                    return;
+                                }
+                            }
+                        }
                         if let Some((before_workspace_id, _)) = target {
                             if let Some(method) = self.workspace_move_method(
                                 &source_workspace_id,
@@ -1473,6 +1572,11 @@ impl ClientShellState {
             return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::Settings(_))) {
+            if matches!(mouse.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp) {
+                self.move_settings_selection(if mouse.kind == MouseEventKind::ScrollDown { 1 } else { -1 });
+                outcome.repaint = true;
+                return;
+            }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some((_, section)) = self
                     .hits
@@ -1988,6 +2092,10 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                if let Some((_, section)) = self.hits.harness_buttons.iter().find(|(rect, _)| super::contains(*rect, point)) {
+                    outcome.actions.push(ClientShellAction::HarnessSettings { section: section.clone() });
+                    return;
+                }
                 if super::contains(self.hits.new_workspace, point) {
                     self.record_binding(
                         crate::input::KeybindMatch::Action(
@@ -1998,11 +2106,14 @@ impl ClientShellState {
                     return;
                 }
                 if super::contains(self.hits.new_tab, point) {
-                    self.record_binding(
-                        crate::input::KeybindMatch::Action(crate::input::KeybindAction::NewTab),
-                        outcome,
-                    );
+                    self.add_tiled_pane(outcome);
                     return;
+                }
+                if self.active_endpoint_id.is_local() {
+                    if let Some((_, pane_id)) = self.hits.optimize_buttons.iter().find(|(rect, _)| super::contains(*rect, point)) {
+                        outcome.actions.push(ClientShellAction::OptimizePrompt { pane_id: pane_id.clone() });
+                        return;
+                    }
                 }
                 if super::contains(self.hits.tab_scroll_left, point) {
                     self.tab_scroll = self.tab_scroll.saturating_sub(1);
@@ -2090,6 +2201,14 @@ impl ClientShellState {
                     .flatten();
                 if let Some(tab_press) = tab_press {
                     self.tab_press = Some(tab_press);
+                    return;
+                }
+                let draggable_agent = self.hits.endpoint_agents.iter()
+                    .find(|(r,e,_)| *e == self.active_endpoint_id && super::contains(*r,point))
+                    .map(|(_,_,p)| p.clone())
+                    .or_else(|| self.hits.agents.iter().find(|(r,_)| super::contains(*r,point)).map(|(_,p)|p.clone()));
+                if let Some(pane) = draggable_agent {
+                    self.agent_press = Some((pane, mouse.column, mouse.row, false));
                     return;
                 }
                 if self.handle_endpoint_agent_click(point, outcome) {

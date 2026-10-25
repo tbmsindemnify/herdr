@@ -448,6 +448,11 @@ impl ClientShellState {
     }
 
     pub(super) fn supports_endpoint_method(&self, method: &crate::api::schema::Method) -> bool {
+        if self.active_endpoint_id.is_local()
+            && matches!(method, crate::api::schema::Method::PaneMove(_))
+        {
+            return true; // The local public API supports moves on 0.9.1.
+        }
         self.endpoints
             .iter()
             .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)

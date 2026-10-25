@@ -91,6 +91,8 @@ pub(super) struct ShellHitMap {
     pub(super) workspace_max_scroll: usize,
     pub(super) tabs: Vec<(Rect, String)>,
     pub(super) panes: Vec<PaneHit>,
+    pub(super) optimize_buttons: Vec<(Rect, String)>,
+    pub(super) harness_buttons: Vec<(Rect, String)>,
     pub(super) popup: Option<PaneHit>,
     pub(super) pane_splits: Vec<PaneSplitHit>,
     pub(super) agents: Vec<(Rect, String)>,
@@ -236,6 +238,10 @@ pub(super) struct WorkspaceHit {
 
 #[derive(Debug)]
 pub(crate) enum ClientShellAction {
+    OptimizePrompt { pane_id: String },
+    HarnessSettings { section: String },
+    NativeSettings { request: String },
+    StartReview { sources: Vec<String>, reviewer: String },
     Endpoint {
         endpoint_id: ClientEndpointId,
         boot_id: String,
@@ -386,6 +392,7 @@ pub(super) enum ClientSettingsSection {
     Sound,
     Toast,
     Integrations,
+    Opacity, Keys, Agents, Models, Skills, Plugins, Media, Request, Optimize,
 }
 
 impl ClientSettingsSection {
@@ -395,6 +402,7 @@ impl ClientSettingsSection {
         Self::Sound,
         Self::Toast,
         Self::Integrations,
+        Self::Opacity, Self::Keys, Self::Agents, Self::Models, Self::Skills, Self::Plugins, Self::Media, Self::Request,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -404,8 +412,19 @@ impl ClientSettingsSection {
             Self::Sound => "sound",
             Self::Toast => "toasts",
             Self::Integrations => "integrations",
+            Self::Opacity => "opacity", Self::Keys => "keys", Self::Agents => "agents",
+            Self::Models => "models", Self::Skills => "skills", Self::Plugins => "plugins",
+            Self::Media => "media", Self::Request => "request", Self::Optimize => "optimize",
         }
     }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(super) struct NativeSettingsRow {
+    pub(super) id: String,
+    pub(super) label: String,
+    pub(super) value: String,
+    pub(super) editable: bool,
 }
 
 #[derive(Debug)]
@@ -418,6 +437,11 @@ pub(super) struct ClientSettingsOverlay {
     pub(super) integration_messages: Vec<String>,
     pub(super) loading_integrations: bool,
     pub(super) installing_integrations: bool,
+    pub(super) native_rows: Vec<NativeSettingsRow>,
+    pub(super) native_message: String,
+    pub(super) native_edit: Option<TextEditor>,
+    pub(super) native_pane: Option<String>,
+    pub(super) native_result: Option<std::sync::mpsc::Receiver<String>>,
 }
 
 #[derive(Debug)]
@@ -515,6 +539,7 @@ pub(super) enum ClientContextMenuAction {
     RemoveWorktree,
     ToggleGroup,
     NewTab,
+    Paste,
     RenamePane,
     ClearPaneName,
     SwapWithFocusedPane,
@@ -607,6 +632,11 @@ impl ClientShellOverlay {
 #[derive(Debug)]
 pub(super) enum PendingEndpointKind {
     Generic,
+    WorkspaceMerge {
+        remaining: VecDeque<String>,
+        tab_id: String,
+        reviewer: String,
+    },
     ProductAnnouncementDismiss {
         version: String,
         id: String,
@@ -856,7 +886,9 @@ pub(crate) struct ClientShellState {
     pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
     pub(super) chrome_drag: Option<ClientChromeDrag>,
     pub(super) workspace_press: Option<ClientWorkspacePress>,
+    pub(super) workspace_merge_hover: Option<String>,
     pub(super) tab_press: Option<ClientTabPress>,
+    pub(super) agent_press: Option<(String, u16, u16, bool)>,
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) workspace_scroll: usize,
@@ -886,6 +918,9 @@ pub(crate) struct ClientShellState {
     pub(super) replaying_url_click: bool,
     pub(super) selection: Option<crate::selection::Selection<String>>,
     pub(super) last_pane_click: Option<ClientPaneClick>,
+    // Pointer-entry ownership survives keyboard focus changes. Moving within
+    // the same pane must not take focus back from a keyboard-selected pane.
+    pub(super) hover_focus_pane: Option<String>,
     pub(super) selection_autoscroll: Option<ClientSelectionAutoscroll>,
     pub(super) selection_autoscroll_deadline: Option<std::time::Instant>,
     pub(super) selection_highlight_clear_deadline: Option<std::time::Instant>,
@@ -923,6 +958,11 @@ pub(crate) struct ClientShellState {
     pub(super) local_config_diagnostic: Option<String>,
     pub(super) config_diagnostic: Option<String>,
     pub(super) endpoint_error: Option<String>,
+    pub(super) optimizer_result: Option<std::sync::mpsc::Receiver<String>>,
+    pub(super) optimizer_pane: Option<String>,
+    pub(super) usage_result: Option<std::sync::mpsc::Receiver<String>>,
+    pub(super) usage_next_refresh: std::time::Instant,
+    pub(super) usage_labels: HashMap<String, String>,
     pub(super) endpoint_error_deadline: Option<std::time::Instant>,
     pub(super) dismissed_product_announcement: Option<(String, String)>,
 }
@@ -1018,7 +1058,9 @@ impl ClientShellState {
             last_sidebar_divider_click: None,
             chrome_drag: None,
             workspace_press: None,
+            workspace_merge_hover: None,
             tab_press: None,
+            agent_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
             workspace_scroll: 0,
@@ -1048,6 +1090,7 @@ impl ClientShellState {
             replaying_url_click: false,
             selection: None,
             last_pane_click: None,
+            hover_focus_pane: None,
             selection_autoscroll: None,
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
@@ -1085,6 +1128,11 @@ impl ClientShellState {
             config_diagnostic: local_config_diagnostic.clone(),
             local_config_diagnostic,
             endpoint_error: None,
+            optimizer_result: None,
+            optimizer_pane: None,
+            usage_result: None,
+            usage_next_refresh: std::time::Instant::now(),
+            usage_labels: HashMap::new(),
             endpoint_error_deadline: None,
             dismissed_product_announcement: None,
         }
@@ -1197,6 +1245,8 @@ impl ClientShellState {
     }
 
     pub(super) fn reset_endpoint_projection(&mut self) {
+        self.workspace_merge_hover = None;
+        self.hover_focus_pane = None;
         self.hits = ShellHitMap::default();
         self.pane_surface = None;
         self.pending_pane_surface = None;
@@ -1205,6 +1255,7 @@ impl ClientShellState {
         self.chrome_drag = None;
         self.workspace_press = None;
         self.tab_press = None;
+        self.agent_press = None;
         self.workspace_scroll = 0;
         self.agent_scroll = 0;
         self.tab_scroll = 0;
@@ -1656,6 +1707,7 @@ impl ClientShellState {
             self.chrome_drag = None;
             self.workspace_press = None;
             self.tab_press = None;
+        self.agent_press = None;
             if self.pane_mouse_gesture.as_ref().is_some_and(|gesture| {
                 gesture.hit.popup && previous_popup.as_deref() == Some(gesture.hit.pane_id.as_str())
             }) {

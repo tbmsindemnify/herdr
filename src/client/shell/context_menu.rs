@@ -52,7 +52,7 @@ impl ClientContextMenuOverlay {
                 right_click_passthrough,
                 ..
             } => {
-                let mut items = vec![item("Rename pane", Action::RenamePane)];
+                let mut items = vec![item("Paste", Action::Paste), item("Rename pane", Action::RenamePane)];
                 if *has_manual_label {
                     items.push(item("Clear pane name", Action::ClearPaneName));
                 }
@@ -379,6 +379,9 @@ impl ClientShellState {
         };
 
         match action {
+            ClientContextMenuAction::Paste => {
+                self.paste_into_pane_with(pane_id, outcome, crate::platform::read_clipboard_text);
+            }
             ClientContextMenuAction::RenamePane => {
                 let label = self.snapshot.as_deref().and_then(|snapshot| {
                     snapshot
@@ -460,6 +463,15 @@ impl ClientShellState {
                 self.push_endpoint_method(Method::PaneClose(PaneTarget { pane_id }), outcome)
             }
             _ => {}
+        }
+    }
+}
+
+impl ClientShellState {
+    pub(super) fn paste_into_pane_with(&mut self, pane_id: String, outcome: &mut ClientShellInput, read: impl FnOnce() -> Option<String>) {
+        if !self.snapshot.as_deref().is_some_and(|s| s.panes.iter().any(|p| p.pane_id == pane_id)) { return; }
+        if let Some(text) = read() {
+            super::push_target_event(ClientInputTarget::Pane(pane_id), ClientPaneInputEvent::Paste(text), outcome);
         }
     }
 }

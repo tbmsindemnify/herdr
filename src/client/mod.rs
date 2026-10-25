@@ -28,6 +28,7 @@ mod handshake;
 mod input;
 mod loop_config;
 mod notifications;
+mod optimize_helpers;
 mod shell;
 mod shell_runtime;
 mod startup;
@@ -787,6 +788,12 @@ async fn run_client_loop(
                         if let Some(image) =
                             read_image_file_from_terminal_drop(&data, image_bridge_active)
                         {
+                            // A dropped image goes to the pane under the pointer, like other drops.
+                            let target = state
+                                .shell
+                                .as_ref()
+                                .and_then(|shell| shell.drop_image_target())
+                                .unwrap_or(target);
                             write_remote_image_to_server(
                                 &mut write_stream,
                                 target,
@@ -2110,7 +2117,8 @@ async fn run_client_loop(
                         let (effects, notification_repaint) = shell.tick_notifications(now);
                         outcome.repaint |= notification_repaint
                             | shell.tick_copy_feedback(now)
-                            | shell.tick_endpoint_error(now);
+                            | shell.tick_endpoint_error(now)
+                            | shell.tick_native_settings();
                         let frame = outcome
                             .repaint
                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))

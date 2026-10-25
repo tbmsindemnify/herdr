@@ -8,6 +8,7 @@ pub(super) struct TextEditor {
     cursor: usize,
     replace_on_type: bool,
     killed: String,
+    multiline: bool,
 }
 
 impl std::ops::Deref for TextEditor {
@@ -30,6 +31,12 @@ impl From<&str> for TextEditor {
 }
 
 impl TextEditor {
+    pub fn multiline(text: &str) -> Self {
+        let mut editor = Self { multiline: true, ..Self::default() };
+        editor.insert(text);
+        editor.replace_on_type = true;
+        editor
+    }
     pub fn new(text: &str, replace_on_type: bool) -> Self {
         let mut editor = Self::default();
         editor.insert(text);
@@ -77,6 +84,7 @@ impl TextEditor {
                     }
                     normalized.push(' ');
                 }
+                '\n' if self.multiline => normalized.push('\n'),
                 '\n' | '\t' => normalized.push(' '),
                 ch if !ch.is_control() => normalized.push(ch),
                 _ => {}

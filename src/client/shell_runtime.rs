@@ -10,8 +10,72 @@ pub(super) fn dispatch_client_shell_actions(
 ) -> Result<(Vec<crossterm::event::MouseEvent>, bool), ClientError> {
     let mut replay_mouse = Vec::new();
     let mut repaint = false;
-    for action in actions {
+    let mut actions: std::collections::VecDeque<_> = actions.into();
+    while let Some(action) = actions.pop_front() {
         match action {
+            shell::ClientShellAction::HarnessSettings { section } => {
+                if let Some(shell) = shell.as_deref_mut() {
+                    actions.extend(shell.open_harness_settings(&section));
+                    repaint = true;
+                }
+            }
+            shell::ClientShellAction::NativeSettings { request } => {
+                if let Some(script) = crate::client::optimize_helpers::helper("native_settings.py") {
+                    let socket = crate::api::client::ApiClient::local().socket_path();
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    if let Some(shell) = shell.as_deref_mut() { shell.set_native_settings_receiver(receiver); }
+                    std::thread::spawn(move || {
+                        let result = std::process::Command::new("python3")
+                            .arg(script)
+                            .arg(request).arg(socket).output();
+                        let response = match result {
+                            Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
+                            Ok(output) => serde_json::json!({"error": String::from_utf8_lossy(&output.stderr)}).to_string(),
+                            Err(error) => serde_json::json!({"error": error.to_string()}).to_string(),
+                        };
+                        let _ = sender.send(response);
+                    });
+                }
+            }
+            shell::ClientShellAction::OptimizePrompt { pane_id } => {
+                if let Some(shell) = shell.as_deref_mut() {
+                    if let Some(script) = crate::client::optimize_helpers::helper("workspace_optimize.py") {
+                        let (sender, receiver) = std::sync::mpsc::channel();
+                        if shell.begin_inline_optimizer(pane_id.clone(), receiver) {
+                            let socket = crate::api::client::ApiClient::local().socket_path();
+                            std::thread::spawn(move || {
+                                let result = std::process::Command::new("python3")
+                                    .arg(script)
+                                    .arg("--inline").arg(pane_id).arg(socket).output();
+                                let message = match result {
+                                    Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
+                                    Ok(output) => format!("Optimize: {}", String::from_utf8_lossy(&output.stderr)),
+                                    Err(error) => format!("Optimize: {error}"),
+                                };
+                                let _ = sender.send(message);
+                            });
+                            repaint = true;
+                        }
+                    }
+                }
+            }
+            shell::ClientShellAction::StartReview { sources, reviewer } => {
+                if let Some(script) = crate::client::optimize_helpers::helper("review.py") {
+                    let mut command = std::process::Command::new("python3");
+                    command.arg(script)
+                        .arg("start").arg("--socket").arg(crate::api::client::ApiClient::local().socket_path())
+                        .arg("--reviewer").arg(reviewer);
+                    for source in sources { command.arg("--source").arg(source); }
+                    // Resolve terminal identities before the move. This local setup
+                    // only records a review job; the watcher waits for a free agent.
+                    match command.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
+                        Ok(status) if status.success() => {},
+                        _ => { if let Some(shell) = shell.as_deref_mut() {
+                            repaint |= shell.receive_endpoint_error("The panes can combine, but the live review could not be queued.".into());
+                        } }
+                    }
+                }
+            }
             shell::ClientShellAction::Endpoint {
                 endpoint_id,
                 boot_id,
@@ -20,7 +84,35 @@ pub(super) fn dispatch_client_shell_actions(
                 if let Some(connection) = endpoints.connection(&endpoint_id).filter(|_| {
                     endpoints.active_id() == &endpoint_id && endpoints.active_surface_available()
                 }) {
-                    endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
+                    if endpoint_id.is_local()
+                        && matches!(request.method, crate::api::schema::Method::PaneMove(_))
+                    {
+                        // Compatibility with 0.9.1: pane.move exists on the public local
+                        // socket but is absent from the client-shell method allowlist.
+                        let api = crate::api::client::ApiClient::local();
+                        let same_session = crate::server::socket_paths::derive_client_socket_from_api_socket(&api.socket_path()) == crate::server::socket_paths::client_socket_path();
+                        let result = if same_session {
+                            api.request_value_with_timeout(&request, std::time::Duration::from_secs(2))
+                                .and_then(crate::api::client::parse_response_value)
+                                .map(|response| response.result)
+                                .map_err(|error| shell::ClientShellEndpointError {
+                                    code: Some("local_move_failed".into()),
+                                    message: error.to_string(),
+                                })
+                        } else {
+                            Err(shell::ClientShellEndpointError {
+                                code: Some("local_session_mismatch".into()),
+                                message: "The local API does not match this client session.".into(),
+                            })
+                        };
+                        if let Some(shell) = shell.as_deref_mut() {
+                            let (changed, followup) = shell.handle_endpoint_result(&boot_id, &request.id, result);
+                            repaint |= changed;
+                            actions.extend(followup);
+                        }
+                    } else {
+                        endpoint_commands.enqueue(endpoint_id, connection.generation, boot_id, request);
+                    }
                 } else if let Some(shell) = shell.as_deref_mut() {
                     repaint |= shell.cancel_endpoint_request(&request.id);
                 }

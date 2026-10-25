@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn terminal_clipboard_paste_preserves_multiline_text_without_sending() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    let key = crate::input::TerminalKey::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+    let text = "Copied from the web — café\nSecond line\n";
+    let mut outcome = ClientShellInput::default();
+    assert!(state.handle_terminal_paste_shortcut_with(&key, &mut outcome, || Some(text.into())));
+    assert!(matches!(
+        &outcome.requests[..],
+        [ClientMessage::ClientShellPaneInput { pane_id, events }]
+            if pane_id == "pane_1"
+                && matches!(&events[..], [ClientPaneInputEvent::Paste(value)] if value == text)
+    ));
+    assert!(outcome.actions.is_empty());
+    state.mode = ClientShellMode::Prefix;
+    assert!(!state.handle_terminal_paste_shortcut_with(&key, &mut outcome, || panic!("must not read clipboard outside a composer")));
+}
+
+#[test]
 fn clipboard_image_targets_the_focused_pane_or_active_popup() {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(snapshot()));

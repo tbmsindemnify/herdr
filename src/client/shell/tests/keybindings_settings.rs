@@ -1,6 +1,55 @@
 use super::*;
 
 #[test]
+fn inline_optimizer_never_opens_overlay_and_prevents_duplicate_jobs() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.usage_next_refresh = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    assert!(state.begin_inline_optimizer("w1:p1".into(), receiver));
+    assert!(state.overlay.is_none());
+    let (_, duplicate) = std::sync::mpsc::channel();
+    assert!(!state.begin_inline_optimizer("w1:p2".into(), duplicate));
+    sender.send("Optimized; unsent".into()).unwrap();
+    assert!(state.tick_native_settings());
+    assert!(state.overlay.is_none());
+    assert!(state.optimizer_result.is_none());
+    assert_eq!(state.endpoint_error.as_deref(), Some("Optimized; unsent"));
+}
+
+#[test]
+fn native_workspace_settings_edit_and_cancel_stay_inside_client() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    let actions = state.open_harness_settings("agents");
+    assert!(matches!(&actions[..], [ClientShellAction::NativeSettings { .. }]));
+    state.receive_native_settings(r#"{"rows":[{"id":"0:name","label":"Name","value":"Original","editable":true}],"message":""}"#);
+    let mut outcome = ClientShellInput::default();
+    state.apply_settings_choice(&mut outcome);
+    assert!(outcome.actions.is_empty());
+    assert!(state.insert_overlay_text("Replacement"));
+    state.apply_settings_choice(&mut outcome);
+    let ClientShellAction::NativeSettings { request } = &outcome.actions[0] else { panic!("native save"); };
+    let data: serde_json::Value = serde_json::from_str(request).unwrap();
+    assert_eq!(data["value"], "Replacement");
+    assert!(outcome.requests.is_empty());
+    state.cancel_settings_overlay();
+    assert!(state.overlay.is_none());
+}
+
+#[test]
+fn native_settings_sections_remain_clickable_when_wrapped() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot()));
+    state.set_pane_surface(surface());
+    state.open_settings_overlay();
+    state.compose(106, 40).unwrap();
+    for section in ClientSettingsSection::ALL {
+        assert!(state.hits.settings_tabs.iter().any(|(rect, value)| value == section && rect.width > 0));
+    }
+}
+
+#[test]
 fn shell_new_controls_use_the_same_client_action_routes_as_keybinds() {
     let mut config = Config::default();
     config.ui.prompt_new_workspace_name = false;
@@ -34,14 +83,10 @@ fn shell_new_controls_use_the_same_client_action_routes_as_keybinds() {
             row: new_tab.y,
             modifiers: KeyModifiers::empty(),
         })]);
-    assert!(open_new_tab.actions.is_empty());
-    assert!(matches!(
-        state.overlay,
-        Some(ClientShellOverlay::Rename(ClientRenameOverlay {
-            target: ClientRenameTarget::NewTab { .. },
-            ..
-        }))
-    ));
+    assert!(matches!(&open_new_tab.actions[..],
+        [ClientShellAction::Endpoint { request, .. }]
+        if matches!(request.method, crate::api::schema::Method::PaneSplit(_))));
+    assert!(state.overlay.is_none());
 }
 
 #[test]

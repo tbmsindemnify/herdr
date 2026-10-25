@@ -180,7 +180,7 @@ fn host_cursor_policy_native_and_drawn_override_auto_detection() {
 }
 
 #[test]
-fn image_bridge_follows_the_selected_remote_endpoint() {
+fn image_bridge_follows_the_selected_local_or_remote_endpoint() {
     let remote = crate::client::endpoint::ClientEndpointId::Ssh(
         crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
     );
@@ -191,7 +191,7 @@ fn image_bridge_follows_the_selected_remote_endpoint() {
         &crate::client::endpoint::ClientEndpointId::Local,
         true,
     ));
-    assert!(!endpoint_accepts_local_images(
+    assert!(endpoint_accepts_local_images(
         false,
         &crate::client::endpoint::ClientEndpointId::Local,
         true,

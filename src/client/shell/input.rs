@@ -167,7 +167,14 @@ impl ClientShellState {
                 push_host_theme_update(&mut outcome.requests, update);
             }
             match event {
-                RawInputEvent::Key(key) => self.handle_key(key, &mut outcome),
+                RawInputEvent::Key(mut key) => {
+                    if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::SHIFT
+                        && self.overlay.is_none() && self.mode == ClientShellMode::Terminal {
+                        key.modifiers = KeyModifiers::empty();
+                        key.generated_text = None;
+                    }
+                    self.handle_key(key, &mut outcome);
+                }
                 RawInputEvent::Text(text) => {
                     let text = text.into_string();
                     if matches!(
@@ -228,10 +235,32 @@ impl ClientShellState {
                         if self.insert_overlay_text(&text) {
                             outcome.repaint = true;
                         } else if self.overlay.is_none() && self.mode == ClientShellMode::Terminal {
-                            self.push_focused_pane_event(
-                                ClientPaneInputEvent::Paste(text),
-                                &mut outcome,
-                            );
+                            // A file dropped onto the window lands in the pane under the pointer.
+                            let is_drop = super::drop_target::looks_like_file_drop(&text);
+                            let drop_pane = is_drop.then(|| self.drop_target_pane()).flatten();
+                            if is_drop {
+                                tracing::debug!(target_pane = ?drop_pane, "file drop paste");
+                            }
+                            if let Some(pane_id) = drop_pane {
+                                if self.focused_pane_id().as_deref() != Some(pane_id.as_str()) {
+                                    self.push_endpoint_method(
+                                        crate::api::schema::Method::PaneFocus(
+                                            crate::api::schema::PaneTarget { pane_id: pane_id.clone() },
+                                        ),
+                                        &mut outcome,
+                                    );
+                                }
+                                super::push_target_event(
+                                    ClientInputTarget::Pane(pane_id),
+                                    ClientPaneInputEvent::Paste(text),
+                                    &mut outcome,
+                                );
+                            } else {
+                                self.push_focused_pane_event(
+                                    ClientPaneInputEvent::Paste(text),
+                                    &mut outcome,
+                                );
+                            }
                         }
                     }
                 }
@@ -457,6 +486,7 @@ impl ClientShellState {
         matches!(
             self.overlay.as_ref(),
             Some(ClientShellOverlay::Rename(_))
+                | Some(ClientShellOverlay::Settings(ClientSettingsOverlay { native_edit: Some(_), .. }))
                 | Some(ClientShellOverlay::WorktreeCreate(
                     ClientWorktreeCreateOverlay {
                         creating: false,
@@ -497,12 +527,42 @@ impl ClientShellState {
         true
     }
 
+    pub(super) fn handle_terminal_paste_shortcut_with(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+        read_clipboard_text: impl FnOnce() -> Option<String>,
+    ) -> bool {
+        if !is_modal_paste_shortcut(key) {
+            return false;
+        }
+        let Some(target) = self.clipboard_image_target() else {
+            return false;
+        };
+        let Some(text) = read_clipboard_text() else {
+            return false;
+        };
+        self.prepare_committed_text(&text, outcome);
+        let target = match target {
+            crate::protocol::ClientClipboardImageTarget::DirectTerminal => return false,
+            crate::protocol::ClientClipboardImageTarget::Pane(id) => ClientInputTarget::Pane(id),
+            crate::protocol::ClientClipboardImageTarget::Popup(id) => ClientInputTarget::Popup(id),
+        };
+        // Preserve multiline content as one paste; never synthesize Enter/send.
+        super::push_target_event(target, ClientPaneInputEvent::Paste(text), outcome);
+        true
+    }
+
     fn route_key_press(
         &mut self,
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> Option<ClientInputTarget> {
         if self.handle_modal_paste_shortcut_with(key, outcome, crate::platform::read_clipboard_text)
+        {
+            return None;
+        }
+        if self.handle_terminal_paste_shortcut_with(key, outcome, crate::platform::read_clipboard_text)
         {
             return None;
         }

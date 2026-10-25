@@ -55,11 +55,13 @@ pub(super) fn client_remote_image_paste_key(
 }
 
 pub(super) fn endpoint_accepts_local_images(
-    remote_client_process: bool,
-    endpoint_id: &super::endpoint::ClientEndpointId,
+    _remote_client_process: bool,
+    _endpoint_id: &super::endpoint::ClientEndpointId,
     active_surface_available: bool,
 ) -> bool {
-    active_surface_available && (remote_client_process || !endpoint_id.is_local())
+    // The clipboard belongs to the client desktop even when its server is local.
+    // Child CLIs need not implement the host's Wayland clipboard themselves.
+    active_surface_available
 }
 
 #[cfg(unix)]

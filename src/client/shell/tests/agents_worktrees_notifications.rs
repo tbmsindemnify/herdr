@@ -520,7 +520,9 @@ fn agent_sidebar_honors_priority_symbols_tokens_and_stable_hits() {
         column: first.x,
         row: first.y,
         modifiers: KeyModifiers::empty(),
-    })]);
+    }), RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left), column: first.x + 2, row: first.y, modifiers: KeyModifiers::NONE,
+        })]);
     let [ClientShellAction::Endpoint { request, .. }] = &click.actions[..] else {
         panic!("agent row should focus through endpoint API");
     };

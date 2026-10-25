@@ -170,6 +170,8 @@ fn local_agent_click_can_cancel_a_pending_remote_switch() {
             column: rect.x + 2,
             row: rect.y,
             modifiers: KeyModifiers::NONE,
+        }), RawInputEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left), column: rect.x + 2, row: rect.y, modifiers: KeyModifiers::NONE,
         })]);
         assert!(
             matches!(outcome.actions.as_slice(), [ClientShellAction::ActivateEndpoint {

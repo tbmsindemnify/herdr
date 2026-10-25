@@ -442,6 +442,9 @@ impl ClientShellState {
     }
 
     pub(super) fn insert_overlay_text(&mut self, text: &str) -> bool {
+        if let Some(ClientShellOverlay::Settings(settings)) = self.overlay.as_mut() {
+            return settings.native_edit.as_mut().is_some_and(|editor| editor.insert(text));
+        }
         if self.insert_worktree_overlay_text(text) {
             return true;
         }
